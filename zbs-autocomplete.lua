@@ -28,19 +28,79 @@ local ID_AUTOCOMPLETE_REBUILD = ID("ID_AUTOCOMPLETE_REBUILD")
 local ID_AUTOCOMPLETE_MENU = ID("ID_AUTOCOMPLETE_MENU")
 
 
+function Plugin:onSave()
+    self:rebuildAutocomplete()
+end
 
 
 function Plugin:onProjectLoad(projdir) 
---  ProjectSetInterpreter("pito")
-   -- TODO, gen api
+   self:rebuildAutocomplete()
 end
 
 
 function Plugin:rebuildAutocomplete() 
   --while developing we should reload the rebuilder
   dofile(package_root..GetPathSeparator()..'apigen.lua')
- -- BuildApiFromStartFile(filename, globalsFromExternalProjects)
- --start file 
+ 
+  local startFile = ide:GetProjectStartFile()
+  
+  if (not startFile) then 
+    DisplayOutputLn("Couldn't rebuild API, no startfile for project")
+    return 
+  end
+ 
+  local startPath = GetPathWithSep(startFile).."?.lua"
+  local nametmp = wx.wxFileName(startFile)
+--  nametmp:ClearExt()
+  local startName = nametmp:GetName()
+  
+  assert(not wx.wxFileName(startName):HasExt())
+  
+  --make sure we have a copy of the base api
+  if not self.baseApi then
+    ide.config.api = self.apisWithoutProject
+    ReloadLuaAPI()
+    local api = {}
+    for k,v in pairs(GetApi("lua").ac.childs) do
+      api[k] = v
+    end
+    self.baseApi = api
+  end
+  
+  
+  
+  local projectApi
+  local success, err = xpcall(function()  projectApi = BuildApiFromStartFile(startPath, startName, self.baseApi) end,
+      function(err)  DisplayOutputLn(debug.traceback()); return err end
+  )
+  
+  -- build project api if possible
+  if success then
+      
+      -- add project to the list of api's
+      local apisWithProject = {};
+      for k,v in pairs(self.apisWithoutProject) do
+        apisWithProject[k] = v
+      end
+      table.insert(apisWithProject,"project")
+      ide.config.api = apisWithProject
+      
+      --put our output where reload can find it (the cache)
+      ide.apis['lua']['project'] = projectApi --todo, actually output this to a file to make project loads faster
+
+      ReloadLuaAPI()
+      DisplayOutputLn("Project api creation/rebuild complete")
+  else
+      --revert to our last known good one if it exists
+      if (ide.apis['lua']['project']) then
+        ide.config.api = apisWithProject
+        ReloadLuaAPI()
+      end
+      
+      DisplayOutputLn("Error reloading/creating project api")
+      DisplayOutputLn(err)
+  end
+
 end
 
 function Plugin:addMainMenu()
@@ -60,8 +120,9 @@ end
 
 
 function Plugin:onRegister() 
-  
+  self.apisWithoutProject =  ide.config.api
   self:addMainMenu()
+  self.baseApi = false
   DisplayOutputLn("Plugin registered")
 end
 
@@ -74,6 +135,7 @@ local plugin = {
   dependencies = 1.10,
   onRegister = function() Plugin:onRegister() end,
   onProjectLoad = function(self, projectDir) Plugin:onProjectLoad(projectDir) end,
+  onEditorSave = function() Plugin:onSave() end,
   instance = Plugin
 }
 

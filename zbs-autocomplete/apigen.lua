@@ -4,12 +4,20 @@ io.output():setvbuf("no")
 
 require('metalua')
 
-local startDir = ''
+local packagePaths = ''
 
-local requirePrefix = 'require::'
+--local requirePrefix = 'require::'
+local requirePrefix = ''
+
+local function dump(t)
+  local serpent = require('serpent')
+  DisplayOutputLn(serpent.block(t))
+end
+
 local function loadFileSrc(name)
+ 
   local f = io.open(name, 'r')
-  if not f then error("File:"..tostring(name).." not found") end
+  if not f then error("File:"..tostring(name).." not found in"..packagePaths) end
   local src = f:read('*a')
   f:close()
   return src
@@ -182,7 +190,7 @@ local function updateValue(o, n)
   end
   
   if n.valuetype then
-     if o.valuetype == nil then
+     if o.valuetype == nil or type(n.valuetype) == "function" then
        o.valuetype = n.valuetype
      elseif o.valuetype ~= n.valuetype then
        updateValue(o.valuetype, n.valuetype) --cross fingers and hope for no infinite loop here
@@ -216,7 +224,7 @@ local function cleanGlobalScope(scope)
   scope['::type'] = nil
   scope['::parent'] = nil
   scope['::global'] = nil
-  scope['_G'] = ni
+  scope['_G'] = nil
   
   local replaced = {}
   local toremove = {}
@@ -464,6 +472,7 @@ function processInvoke(ast, scope)
     else
       local ures = zbsUnresolvedIdent(ast[2], funcname, scope)
       ures.type = "method"
+      
       tabledef.childs[funcname] = ures
       return resolveValuetype(ast, tabledef.childs[funcname].valuetype, scope)
     end
@@ -481,7 +490,7 @@ function processTable(ast, scope)
       
       local val = processExpr(v[2], scope)
       if (val == nil) then
-        print("oops")
+        
         processExpr(v[2], scope)
       end
       
@@ -839,21 +848,58 @@ function processFile(filename, scope)
   local cached = scope[requirePrefix..filename]
   if cached then return cached end
 
-  --do it the hard way
-  local fileast = astFromFile(filename..'.lua')
+
+
+  local requireResult
   
-  --dumptags(fileast,0,4)
-  local requireResult = processBlock(fileast, scope)
-  
-  --require returns bool if no explicit return value
-  if requireResult == nil then
-    requireResult = zbsValue(fileast, "boolean", scope)
+  --can we find it on the filesystem?
+  local fname = package.searchpath(filename, packagePaths)
+  if not fname then 
+    DisplayOutputLn("File not in search path", filename)
+    --not on the filesystem eh?, do we have an api for it?
+    local api = ide.apis['lua'][filename]
+    if type(api) == "table" then
+      return api
+    end
+    
+    if type(api) == "string" then
+      local fn, err = loadfile(api)
+      if fn then
+        suc, res = pcall(function() return fn(env.ac.childs) end)
+        if suc then
+          return res
+        end
+      end
+    end
+    return {
+      type = 'value',
+      location = filename.."0:0",
+      valuetype = "boolean"
+    }
+  else
+     --do it the hard way
+    local fileast = astFromFile(fname)
+    --dumptags(fileast,0,4)
+    requireResult = processBlock(fileast, scope)
+      --require returns bool if no explicit return value
+    DisplayOutputLn("require result for", filename, requireResult)  
+      
+    if requireResult == nil then
+      requireResult = zbsValue(fileast, "boolean", scope)
+    end
+    
+    local requirekey = requirePrefix..filename
+    scope[requirekey] = requireResult
+    
+    return zbsValue(fileast, requirekey, scope)
   end
   
-  local requirekey = requirePrefix..filename
-  scope[requirekey] = requireResult
   
-  return zbsValue(fileast, requirekey, scope)
+   
+
+ 
+  
+
 end
 
 
@@ -864,11 +910,13 @@ local function typesInScope(scope, prefix)
   local function walkTypesInScopeGen(scope, prefix)
     if not prefix then prefix = '' end
     for k,v in pairs(scope) do
-      if type(k) == "number" or ( type(k) == "string" and not k:match("^::")) and not visited[v] then
-        visited[v] = true
+      if type(k) == "number" or ( type(k) == "string" and not k:match("^::"))  then
         coroutine.yield(prefix..k,v)
-        if v.childs then
-          walkTypesInScopeGen(v.childs, prefix..k..".")
+        if not visited[v] then
+          visited[v] = prefix..k
+          if v.childs then
+            walkTypesInScopeGen(v.childs, prefix..k..".")
+          end
         end
       end
     end
@@ -878,19 +926,196 @@ local function typesInScope(scope, prefix)
    return coroutine.wrap(function() walkTypesInScopeGen(scope, prefix) end)
 end
 
+local function trim(s)
+  return s:match"^%s*(.*)":match"(.-)%s*$"
+end
+
+local function flattenScope(scope, existingnames)
+
+  local visited = existingnames or {}
+  
+  local output = {}
+  
+  
+  local function walkTypesInScopeGen(scope, outputscope, prefix)
+    if not prefix then prefix = '' end
+   
+    for k,v in pairs(scope) do
+      DisplayOutputLn("Processing ",k)
+      if type(k) == "number" or ( type(k) == "string" and not k:match("^::") and k ~= "_G")  then
+        
+        if v.type == "class" or v.type == "lib" then
+          local val = {
+               type = "class",
+               description = v.description,
+          }
+          
+          --dont waste time if we have been done before
+          local existingclass = visited[v]
+          if existingclass then
+            val.inherits = existingclass
+            val.childs = {}
+            outputscope[k] = val
+          end
+          
+          if not existingclass then
+          
+            val.inherits = v.inherits
+            
+            --resolve meta table into our inherits
+            local metaidx = isTable(v) and v.metatable and v.metatable.childs and v.metatable.childs.__index
+            local inheritedFuncs = {}
+            if metaidx then
+              --first resolve children that are present in metatable
+             
+              for k1,c in pairs(v.childs) do
+                if c.unresolved and metaidx.childs and metaidx.childs[k1] then
+                  table.insert(inheritedFuncs, k1)
+                end
+              end
+         
+              
+              --find a name for our inherits
+              local inherits = visited[metaidx]
+              --we don't inherit ourself, or someone we know
+              if metaidx ~= v and not inherits then 
+                  --new type!
+                  inherits =  k.."__mt"
+                  walkTypesInScopeGen({ [inherits] = metaidx }, output, '') --process the new one.
+              end
+              --add metaidx name to inheritance list
+              if inherits then
+                val.inherits = inherits.." "..val.inherits
+              end
+            end
+            
+            visited[v] = prefix..k
+            outputscope[k] = val
+            --clean inherits
+            if val.inherits then
+              val.inherits = trim(val.inherits)
+              if val.inherits == "" then
+                val.inherits = nil
+              end
+            end
+            
+            
+            
+            
+            --process children
+            val.childs = {}
+            if v.childs then
+              walkTypesInScopeGen(v.childs, val.childs, prefix..k..".")
+            end
+          end -- end not existing
+          
+        end -- end class or lib
+        
+        if v.type == "function" or v.type == "method" then
+          
+          local val = {
+            type = v.type,
+            description = v.description,
+            args = v.args,
+            returns = v.returns
+          }
+          
+          --resolve valuetype
+          local valuet = v.valuetype
+          
+          if (type(valuet) == "function") then
+            valuet = valuet() --no args since this must be a lib call
+          end
+
+          if valuet then
+            
+            local n = nil
+            if type(valuet) == "string" then
+              n = valuet
+            elseif valuet.type == "value" then
+              n = valuet.valuetype
+            else
+              n = visited[valuet]
+            end
+              
+            if n == nil then
+              --new type
+              n = k.."__returntype"
+              walkTypesInScopeGen({ [n] = valuet  }, output, '') --process the new one.
+            end
+              
+            val.valuetype = n
+          end  -- has value type?
+          
+          outputscope[k] = val
+        end -- function or method
+        
+        if v.type == "value" then
+           local val = {
+             type = "value",
+             description = v.description
+           }
+           
+           outputscope[k] = val
+        end -- value
+        
+      
+    end --key filter
+    DisplayOutputLn("processed ",k)
+    
+  end -- iterator
+    
+  end --generator function
+
+   --dump(scope)
+   walkTypesInScopeGen(scope, output, prefix) 
+   dump(output)
+   return output
+end
 
 
-function BuildApiFromStartFile(startdir, filename, globalsFromExternalProjects)
-  startDir = startdir
+
+
+
+
+
+local function dumpNames(scope)
+  for k,v in typesInScope(scope) do
+    --if not v.unresolved then
+      print(k,"\t\t\t", v.type, v.inherits, "\t\t ", v.valuetype )
+   -- end
+  end
+end
+
+local function dumpRefNames(scope)
+  for k,v in typesInScope(scope) do
+    --if not v.unresolved then
+      if type(v.valuetype) ~= "string" then
+        DisplayOutputLn(k,"\t\t\t", v.type, v.inherits, "\t\t ", v.valuetype,type(v.valuetype) )
+      end
+   -- end
+  end
+end
+
+
+
+
+
+function BuildApiFromStartFile(packageDirs, filename, globalsFromExternalProjects)
+  
+  --dump(globalsFromExternalProjects)
+  
+  packagePaths = packageDirs
   local globalscope = createGlobalScope() --new global scope for this file
   setmetatable(globalscope, { __index = globalsFromExternalProjects }) --fall back to globals from other files
 
   processFile(filename, globalscope)
 
+  
   local function GenNames(scope)
     
-    local resolvedThisTime
-    local unresolved = scope
+    --local resolvedThisTime
+    --local unresolved = scope
     
     local typeToName = {}
 
@@ -898,15 +1123,19 @@ function BuildApiFromStartFile(startdir, filename, globalsFromExternalProjects)
       typeToName[v] = k
     end
     
-    local globalmt = getmetatable(globalsFromExternalProjects)
-    if globalmt and globalmt.__index then
-      for k,v in typesInScope(globalmt.__index) do
-        typeToName[v] = k
-      end
-    end
+    return flattenScope(scope, typeToName)
+    
+    
+    
+  --  local globalmt = getmetatable(globalsFromExternalProjects)
+  --  if globalmt and globalmt.__index then
+  --    for k,v in typesInScope(globalmt.__index) do
+  --      typeToName[v] = k
+  --    end
+  --  end
     
 
-    for k,v in typesInScope(scope) do
+  --[[  for k,v in typesInScope(scope) do
         typeToName[v] = k
     end
     
@@ -952,7 +1181,7 @@ function BuildApiFromStartFile(startdir, filename, globalsFromExternalProjects)
      
       local resolvedmt = {}
       
-      --apply meta table
+      --apply meta table, dedupe classes
       for k,v in typesInScope(scope) do
             --flatten metatable
             local metaidx = isTable(v) and v.metatable and v.metatable.childs and v.metatable.childs.__index and v.metatable.childs.__index
@@ -993,12 +1222,15 @@ function BuildApiFromStartFile(startdir, filename, globalsFromExternalProjects)
       unresolved = resolved
       
     until resolvedThisTime == 0
-
+    ]]--
+    
+    
   end
-  GenNames(globalscope)
-  cleanGlobalScope(globalscope)
+  local api = GenNames(globalscope)
   
-  return globalscope
+  --cleanGlobalScope(globalscope)
+  dump(api)
+  return api
 end
 
 
@@ -1006,10 +1238,6 @@ end
 
 -- test
 
-local function dump(t)
-  local serpent = require('serpent')
-  print(serpent.block(t))
-end
 
 local function dumptags(ast, depth, maxdepth)
   for k=1,depth do
@@ -1035,13 +1263,6 @@ end
 
 
 
-local function dumpNames(scope)
-  for k,v in typesInScope(scope) do
-    --if not v.unresolved then
-      print(k,"\t\t\t", v.type, v.inherits, "\t\t ", v.valuetype )
-   -- end
-  end
-end
 
 
 --local baselib = dofile('D:/daviddownloads/zerobranestudio/api/lua/baselib.lua')
