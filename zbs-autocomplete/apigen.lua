@@ -1,8 +1,9 @@
 io.output():setvbuf("no")
 
 --package.path = package.path..";D:/DavidDownloads/ZeroBraneStudio/lualibs/metalua/?.lua"
+if not pcall(require, 'checks') then function package.preload.checks() function checks() end end end
 
-require('metalua')
+local mlc = require('metalua.compiler').new()
 
 local packagePaths = ''
 
@@ -13,6 +14,7 @@ local function dump(t)
   local serpent = require('serpent')
   DisplayOutputLn(serpent.block(t))
 end
+
 
 local function loadFileSrc(name)
  
@@ -25,13 +27,13 @@ local function loadFileSrc(name)
  
 local function astFromFile(filename)
   local src = loadFileSrc(filename)
-  return mlc.ast_of_luastring(src,'@'..filename)
+  return mlc:src_to_ast(src,'@'..filename)
 end
 
 local function location(ast)
-  local i = ast.lineinfo and ast.lineinfo.first
+  local i = ast.lineinfo and ast.lineinfo.last
   if not i then return "-" end
-  return string.format("%d:%d %s",i[1],i[2], i[4])
+  return string.format("%d:%d %s",i.line,i.column, i.source)
 end
 
 local function getLastComment(ast)
@@ -43,7 +45,7 @@ local function getLastComment(ast)
   end
   return comment
 end
-
+ 
 local function getFirstComment(ast)
   local comment 
   if ast.lineinfo and ast.lineinfo.first and ast.lineinfo.first.comments then

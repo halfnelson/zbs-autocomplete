@@ -59,7 +59,7 @@ function Plugin:rebuildAutocomplete()
   --make sure we have a copy of the base api
   if not self.baseApi then
     ide.config.api = self.apisWithoutProject
-    ReloadLuaAPI()
+    ReloadAPIs("lua")
     local api = {}
     for k,v in pairs(GetApi("lua").ac.childs) do
       api[k] = v
@@ -88,13 +88,13 @@ function Plugin:rebuildAutocomplete()
       --put our output where reload can find it (the cache)
       ide.apis['lua']['project'] = projectApi --todo, actually output this to a file to make project loads faster
 
-      ReloadLuaAPI()
+      ReloadAPIs("lua")
       DisplayOutputLn("Project api creation/rebuild complete")
   else
       --revert to our last known good one if it exists
       if (ide.apis['lua']['project']) then
         ide.config.api = apisWithProject
-        ReloadLuaAPI()
+        ReloadAPIs("lua")
       end
       
       DisplayOutputLn("Error reloading/creating project api")
