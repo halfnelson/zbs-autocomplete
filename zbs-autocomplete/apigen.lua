@@ -147,7 +147,7 @@ local function zbsUnresolvedIdent(ast, name, scope)
      name = name,
      unresolved = true,
   }
-  
+  --DisplayOutputLn("unresolved ident",name, uri.location)
   uri.valuetype = zbsUnresolvedIdentValue(ast, uri, scope)
   return uri
 end
@@ -274,6 +274,17 @@ local function findScopeForName(scope, name)
   end
   return s
 end
+
+local function isApiValue(scope, name)
+   local s = findScopeForName(scope,name)
+   if (s == s['::global']) then
+     --we are global,
+     return rawget(s,name) == nil  --if we can't find ourselves using rawget we must be on the metatable which is our api values
+   end
+   return false
+   
+end
+
 
 local function setInScope(scope, name, value)
   local s = findScopeForName(scope, name)
@@ -555,8 +566,13 @@ function processIndex(ast, scope)
       if val then
         return val
       else
-        tbl.childs[idx[1]] = zbsUnresolvedIdent(ast, idx[1], scope)
-        return tbl.childs[idx[1]]
+        if (isApiValue(scope, idx[1])) then
+          return zbsUnresolvedIdent(ast, idx[1], scope)
+        else
+          tbl.childs[idx[1]] = zbsUnresolvedIdent(ast, idx[1], scope)
+          return tbl.childs[idx[1]]
+        end
+      
       end
     else
       --too complex
@@ -943,7 +959,7 @@ local function flattenScope(scope, existingnames)
     if not prefix then prefix = '' end
    
     for k,v in pairs(scope) do
-      DisplayOutputLn("Processing ",k)
+      --DisplayOutputLn("Processing ",k)
       if type(k) == "number" or ( type(k) == "string" and not k:match("^::") and k ~= "_G")  then
         
         if v.type == "class" or v.type == "lib" then
@@ -1063,7 +1079,7 @@ local function flattenScope(scope, existingnames)
         
       
     end --key filter
-    DisplayOutputLn("processed ",k)
+    --DisplayOutputLn("processed ",k)
     
   end -- iterator
     
@@ -1071,7 +1087,7 @@ local function flattenScope(scope, existingnames)
 
    --dump(scope)
    walkTypesInScopeGen(scope, output, prefix) 
-   dump(output)
+  -- dump(output)
    return output
 end
 
@@ -1126,16 +1142,6 @@ function BuildApiFromStartFile(packageDirs, filename, globalsFromExternalProject
     end
     
     return flattenScope(scope, typeToName)
-    
-    
-    
-  --  local globalmt = getmetatable(globalsFromExternalProjects)
-  --  if globalmt and globalmt.__index then
-  --    for k,v in typesInScope(globalmt.__index) do
-  --      typeToName[v] = k
-  --    end
-  --  end
-    
 
   --[[  for k,v in typesInScope(scope) do
         typeToName[v] = k
@@ -1231,7 +1237,7 @@ function BuildApiFromStartFile(packageDirs, filename, globalsFromExternalProject
   local api = GenNames(globalscope)
   
   --cleanGlobalScope(globalscope)
-  dump(api)
+   dump(api)
   return api
 end
 
